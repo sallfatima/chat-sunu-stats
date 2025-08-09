@@ -14,6 +14,37 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
 from sse_starlette.sse import EventSourceResponse
 import uvicorn
+# Ajoutez ces imports au début du fichier
+from datetime import datetime
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional, Union
+
+# Ajoutez ces modèles après vos imports
+class MessageData(BaseModel):
+    role: str = Field(..., description="Role du message (user/assistant)")
+    content: str = Field(..., description="Contenu du message")
+    type: str = Field(default="human", description="Type de message")
+
+class RunRequest(BaseModel):
+    """Requête pour exécuter un run"""
+    messages: List[MessageData] = Field(..., description="Liste des messages")
+    thread_id: Optional[str] = Field(None, description="ID du thread optionnel")
+    
+class Thread(BaseModel):
+    """Modèle de thread"""
+    thread_id: str = Field(..., description="ID unique du thread")
+    created_at: str = Field(..., description="Date de création")
+    updated_at: Optional[str] = Field(None, description="Date de mise à jour")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Métadonnées")
+    values: Dict[str, Any] = Field(default_factory=dict, description="Valeurs du thread")
+
+class Assistant(BaseModel):
+    """Modèle d'assistant"""
+    assistant_id: str = Field(..., description="ID de l'assistant")
+    name: str = Field(..., description="Nom de l'assistant")
+    graph_id: str = Field(..., description="ID du graphe")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Métadonnées")
+
 
 # =============================================================================
 # CONFIGURATION ET INITIALISATION
@@ -28,9 +59,13 @@ app = FastAPI(
 # Configuration CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://your-production-domain.com"  # Ajoutez votre domaine de production
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -396,85 +431,84 @@ async def search_assistants(graph_id: str = None):
     ]
 
 @app.post("/threads")
-async def create_thread():
-    """Création d'un nouveau thread SunuStat"""
+async def create_thread(thread_data: Optional[Dict[str, Any]] = None):
+    """Création d'un nouveau thread SunuStat compatible LangGraph"""
     thread_id = str(uuid.uuid4())
+    current_time = datetime.now().isoformat()
+    
     print(f"🧵 Nouveau thread créé: {thread_id}")
     
     return Thread(
         thread_id=thread_id,
-        created_at=datetime.now().isoformat()
+        created_at=current_time,
+        updated_at=current_time,
+        metadata=thread_data.get("metadata", {}) if thread_data else {},
+        values={}
     )
+
+@app.get("/threads/{thread_id}")
+async def get_thread(thread_id: str):
+    """Récupérer un thread existant"""
+    # Pour l'instant, retourne un thread vide
+    # Vous pouvez ajouter la logique de persistance plus tard
+    return Thread(
+        thread_id=thread_id,
+        created_at=datetime.now().isoformat(),
+        updated_at=datetime.now().isoformat(),
+        metadata={},
+        values={}
+    )
+
+@app.post("/threads/search")
+async def search_threads(search_data: Dict[str, Any]):
+    """Rechercher des threads par métadonnées"""
+    # Pour l'instant, retourne une liste vide
+    # Vous pouvez implémenter la logique de recherche plus tard
+    return []
 
 @app.post("/threads/{thread_id}/runs/stream")
 async def stream_run(thread_id: str, request: RunRequest):
-    """Stream d'exécution SunuStat avec formatage ANSD"""
+    """Stream d'exécution SunuStat avec formatage compatible LangGraph"""
     
     async def generate_stream():
         try:
+            print(f"📝 Thread {thread_id}: Démarrage du streaming")
+            
             # Validation des données d'entrée
             if not request.messages:
-                yield {
-                    "event": "events",
-                    "data": {
-                        "event": "on_chat_model_stream",
-                        "data": {"chunk": {"content": "❌ Aucun message reçu"}}
-                    }
-                }
+                yield "event: error\ndata: {\"error\": \"Aucun message reçu\"}\n\n"
                 return
 
+            # Récupérer le dernier message
             last_message = request.messages[-1]
             query = last_message.content.strip()
             
-            print(f"📝 Thread {thread_id}: Traitement de '{query[:50]}...'")
+            print(f"🔍 Traitement de: {query[:50]}...")
             
             # Traiter les commandes spéciales
             special_response = process_special_commands(query)
             if special_response:
-                for word in special_response.split():
-                    yield {
-                        "event": "events",
+                # Stream de la réponse spéciale
+                words = special_response.split()
+                for word in words:
+                    chunk_data = {
+                        "event": "on_chat_model_stream",
+                        "run_id": str(uuid.uuid4()),
                         "data": {
-                            "event": "on_chat_model_stream",
-                            "data": {"chunk": {"content": word + " "}}
+                            "chunk": {
+                                "content": word + " ",
+                                "type": "AIMessageChunk"
+                            }
                         }
                     }
+                    yield f"event: data\ndata: {json.dumps(chunk_data)}\n\n"
                     await asyncio.sleep(0.02)
+                
+                # Événement de fin
+                yield f"event: end\ndata: {json.dumps({'type': 'end'})}\n\n"
                 return
             
-            # Émission de l'événement de début
-            yield {
-                "event": "events",
-                "data": {
-                    "event": "on_retrieval_start",
-                    "data": {
-                        "input": "🔍 Recherche en cours dans les documents ANSD...",
-                        "service": "SunuStat",
-                        "query": query,
-                        "rag_mode": "Simple RAG" if RAG_AVAILABLE else "Demo"
-                    }
-                }
-            }
-            
-            # Simulation de la progression
-            progress_steps = [
-                "• 📄 Récupération des documents ANSD",
-                "• 🔍 Analyse sémantique des données", 
-                "• 📊 Traitement des statistiques",
-                "• ✍️ Génération de la réponse..."
-            ]
-            
-            for step in progress_steps:
-                yield {
-                    "event": "events",
-                    "data": {
-                        "event": "on_progress",
-                        "data": {"step": step}
-                    }
-                }
-                await asyncio.sleep(0.4)
-            
-            # Récupérer l'historique des messages précédents
+            # Préparer l'historique des messages pour RAG
             chat_history = []
             messages = request.messages[:-1]
             for i in range(0, len(messages), 2):
@@ -483,75 +517,58 @@ async def stream_run(thread_id: str, request: RunRequest):
                     bot_msg = messages[i + 1].content
                     chat_history.append((user_msg, bot_msg))
             
-            # Appeler Simple RAG
-            rag_result = await call_simple_rag(query, chat_history[-5:])
-            
-            # Traiter le résultat
-            if len(rag_result) == 3:
-                answer, sources, visual_info = rag_result
-            else:
-                answer, sources = rag_result
+            # Appeler votre système RAG
+            try:
+                rag_result = await call_simple_rag(query, chat_history[-5:])
+                
+                if len(rag_result) == 3:
+                    answer, sources, visual_info = rag_result
+                else:
+                    answer, sources = rag_result
+                    visual_info = {}
+                    
+            except Exception as e:
+                print(f"❌ Erreur RAG: {e}")
+                answer = f"❌ Erreur lors du traitement: {str(e)}"
+                sources = []
                 visual_info = {}
-            
-            yield {
-                "event": "events", 
-                "data": {
-                    "event": "on_retrieval_end",
-                    "data": {
-                        "output": f"✅ Analyse terminée - {len(sources) if sources else 0} documents consultés",
-                        "documents_found": len(sources) if sources else 0,
-                        "has_visual": visual_info.get("has_visual", False)
-                    }
-                }
-            }
             
             # Formater la réponse finale
             formatted_response = f"**📊 SunuStat - ANSD répond :**\n\n{answer}"
-            formatted_response += format_sources_info(sources, visual_info)
+            if sources:
+                formatted_response += format_sources_info(sources, visual_info)
             
-            # Stream de la réponse formatée
+            # Stream de la réponse mot par mot
             words = formatted_response.split()
+            run_id = str(uuid.uuid4())
+            
             for word in words:
-                yield {
-                    "event": "events",
+                chunk_data = {
+                    "event": "on_chat_model_stream",
+                    "run_id": run_id,
                     "data": {
-                        "event": "on_chat_model_stream",
-                        "data": {"chunk": {"content": word + " "}}
+                        "chunk": {
+                            "content": word + " ",
+                            "type": "AIMessageChunk"
+                        }
                     }
                 }
-                # Vitesse variable selon le contenu
-                if word.startswith("**") or word.startswith("•"):
-                    await asyncio.sleep(0.05)
-                else:
-                    await asyncio.sleep(0.02)
+                yield f"event: data\ndata: {json.dumps(chunk_data)}\n\n"
+                await asyncio.sleep(0.03)
+            
+            # Événement de fin
+            end_data = {"type": "end", "run_id": run_id}
+            yield f"event: end\ndata: {json.dumps(end_data)}\n\n"
                     
         except Exception as e:
             print(f"❌ Erreur dans stream_run: {e}")
-            
-            error_msg = f"""❌ **Erreur technique**
-
-Une erreur s'est produite : `{str(e)}`
-
-**🔧 Suggestions :**
-• Vérifiez que votre question est claire
-• Réessayez avec une formulation différente
-• Utilisez `/help` pour voir les commandes
-• Contactez l'administrateur si le problème persiste
-
-**📊 Mode actuel :** {'Simple RAG' if RAG_AVAILABLE else 'Démonstration'}"""
-
-            for word in error_msg.split():
-                yield {
-                    "event": "events",
-                    "data": {
-                        "event": "on_chat_model_stream",
-                        "data": {"chunk": {"content": word + " "}}
-                    }
-                }
-                await asyncio.sleep(0.03)
+            error_data = {
+                "event": "error",
+                "data": {"error": str(e)}
+            }
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
     
     return EventSourceResponse(generate_stream())
-
 @app.get("/health")
 async def health_check():
     """Health check avec informations détaillées"""
