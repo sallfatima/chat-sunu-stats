@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "./backend/retrieval_graph/graph.py:graph"
+  },
+  "env": ".env",
+  "image_distro": "wolfi"
+}
